@@ -193,7 +193,8 @@ if __name__ == "__main__":
     # update_config_by_apps(apps, conf)
 
     SLUGS_TOBE_UPDATED = [
-        # 'sunshine-dash-dd',
+        'yy-ddinfo-local-dashboard',
+        'yy-ddinfo-dashboard'
     ]
 
     for slug, data in conf['applications']['web'].items():

@@ -4,7 +4,7 @@
     <title>DD (Alternate) Network Access Dashboard</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon_dd.svg') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon_ddlocal.svg') }}">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -236,6 +236,12 @@
 <body>
     <div class="container">
         <h1>DD (Alternate) Network Access Dashboard</h1>
+
+        <div style="margin: 15px 0; text-align: center;">
+            <button id="updateAllButton" class="toggle-button" style="max-width: 260px; margin: 0 auto;" onclick="updateAllRecords()">
+                更新所有记录
+            </button>
+        </div>
 
         <div class="network-info">
             <div class="network-section">
@@ -474,6 +480,59 @@
             }
 
             document.body.removeChild(textArea);
+        }
+
+        async function updateAllRecords() {
+            const btn = document.getElementById('updateAllButton');
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '更新中...';
+
+            try {
+                const response = await fetch('/dd/webhook/update_all_records', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                });
+
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    // Non-JSON response; handled by status fallback below.
+                }
+
+                const ipOk = Number(data.ip_updates || 0);
+                const stunOk = Number(data.stun_updates || 0);
+                const ipFail = Number(data.ip_failed_count || 0);
+                const stunFail = Number(data.stun_failed_count || 0);
+                const totalOk = ipOk + stunOk;
+                const totalFail = ipFail + stunFail;
+
+                if (response.status === 200) {
+                    showToast(`更新完成：成功 ${totalOk} 条（IP ${ipOk} / STUN ${stunOk}）`);
+                    setTimeout(() => window.location.reload(), 1000);
+                    return;
+                }
+
+                if (response.status === 207) {
+                    showToast(`部分成功：成功 ${totalOk} 条，失败 ${totalFail} 条`);
+                    setTimeout(() => window.location.reload(), 1200);
+                    return;
+                }
+
+                const errMsg = data.error || `更新失败 (HTTP ${response.status})`;
+                showToast(errMsg);
+                console.error('更新所有记录失败:', { status: response.status, data });
+            } catch (err) {
+                console.error('更新所有记录请求异常:', err);
+                showToast(`请求失败: ${err.message || err}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
         }
 
         // 展开/收起服务类型

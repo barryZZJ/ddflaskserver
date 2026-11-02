@@ -1,5 +1,5 @@
 import sys
-
+from loguru import logger
 from flask import Flask
 
 from utils.consts import APP_PORT, APP_HOST
@@ -14,14 +14,15 @@ from utils.consts import APP_PORT, APP_HOST
 
 app = Flask(__name__, static_folder='static', static_url_path='/')
 
+logger.add('log_ddflaskserver.log', rotation='1 day', retention='3 days')
+
 from routes.root.root import bp_root
-# from routes.ddredirect.ddredirect import bp_ddredirect
+from routes.ddredirect.ddredirect import bp_ddredirect
 from routes.authentik.authentik import bp_authentik
 
 app.register_blueprint(bp_root)
 app.register_blueprint(bp_authentik)
-# app.register_blueprint(bp_ddredirect) # we switch to safer authentik instead
-
+app.register_blueprint(bp_ddredirect)
 if __name__ == '__main__':
     # ? 不能是127.0.0.1，否则服务器的端口不开放
     print('Starting wecom_responder...')

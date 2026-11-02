@@ -1,9 +1,14 @@
 import json
 import os
+from threading import Thread
+
 import dns.resolver
 from functools import wraps
-from flask import Blueprint, Response, request, redirect, render_template, send_from_directory
+from flask import Blueprint, Response, request, redirect, render_template, send_from_directory, current_app
 from loguru import logger
+
+from lucky_api import LuckyClient
+from routes.authentik.update_to_yy import webhook_update_ip_yy, webhook_update_stun_port_yy
 
 # Create a Blueprint object for the main section
 bp_ddredirect = Blueprint('ddredirect', __name__, url_prefix='/dd', template_folder='templates')
@@ -104,6 +109,11 @@ def index():
 @require_auth
 def favicon():
     return send_from_directory('static', 'favicon_dd.svg')
+
+@bp_ddredirect.route('/favicon_ddlocal.svg')
+@require_auth
+def favicon2():
+    return send_from_directory('static', 'favicon_ddlocal.svg')
 
 # @bp_ddredirect.route('/<service_name>')
 # def ipv4_redirect(service_name):
@@ -226,6 +236,8 @@ def webhook_update_ip(ip_type):
 
         config['ips'][ip_type] = data['ip']
 
+        # Thread(target=webhook_update_ip_yy, args=(ip_type, data,)).start()  # 更新stun port的部分在authentik里调用了
+
         if save_config(config):
             logger.info(f"{ip_type} IP updated via webhook: {data['ip']}")
             return {"message": f"{ip_type} IP updated successfully."}, 200
@@ -255,6 +267,8 @@ def webhook_update_stun_port():
         # Also update IP for the corresponding IPv4
         config['ips']['ipv4'] = data['ip']
 
+        # Thread(target=webhook_update_stun_port_yy, args=(data,)).start()
+
         if save_config(config):
             logger.info(f"{service_name} STUN port updated via webhook: {data['port']}, IPv4 updated: {data['ip']}")
             return {"message": f"STUN port for {service_name} and IPv4 updated successfully."}, 200
@@ -265,3 +279,111 @@ def webhook_update_stun_port():
         logger.error(f"Webhook更新 STUN端口失败: {e}")
         return {"error": str(e)}, 500
 
+
+@bp_ddredirect.route('/webhook/update_all_records', methods=['POST'])
+@require_auth
+def webhook_update_all_records():
+    """Poll Lucky DDNS/STUN and update local records through existing webhook handlers."""
+    try:
+        lucky_config = os.path.join(os.path.dirname(__file__), '..', '..', 'utils', 'conf_lucky.json')
+        lucky = LuckyClient()
+        lucky.load_config(os.path.normpath(lucky_config))
+
+        ip_updated = 0
+        port_updated = 0
+        ip_failed = []
+        stun_failed = []
+
+        ddns_list = lucky.get_ddns_list() or []
+        for ddns in ddns_list:
+            try:
+                if ddns.get("TaskType") == "IPv6":
+                    ip = ddns.get("Ipv6Addr")
+                    ip_type = "ipv6_ddasus"
+                else:
+                    ip = ddns.get("Ipv4Addr")
+                    ip_type = "ipv4"
+
+                if not ip:
+                    ip_failed.append({"ip_type": ip_type, "reason": "missing ip", "source": ddns})
+                    continue
+
+                with current_app.test_request_context(
+                    f'/dd/webhook/update_ip/{ip_type}',
+                    method='POST',
+                    json={'ip': ip},
+                    headers={'Authorization': request.headers.get('Authorization', '')}
+                ):
+                    result = webhook_update_ip(ip_type)
+
+                webhook_update_ip_yy(ip_type, {'ip': ip})  # Update YY config as well
+
+                status = result[1] if isinstance(result, tuple) else 200
+                if status >= 400:
+                    ip_failed.append({
+                        "ip_type": ip_type,
+                        "ip": ip,
+                        "status": status,
+                        "detail": result[0] if isinstance(result, tuple) else result,
+                    })
+                    continue
+
+                ip_updated += 1
+            except Exception as e:
+                ip_failed.append({"ip_type": ddns.get("TaskType"), "reason": str(e), "source": ddns})
+                logger.error(f"更新单条IP失败(继续): {e}")
+
+        rules = lucky.get_stun_rules() or []
+        for rule in rules:
+            try:
+                payload = {
+                    'service_name': rule.get('Name'),
+                    'ip': rule.get('PublicIp'),
+                    'port': rule.get('PublicPort'),
+                }
+                if not payload['service_name'] or payload['ip'] is None or payload['port'] is None:
+                    stun_failed.append({"service_name": payload.get("service_name"), "reason": "missing required fields", "source": rule})
+                    continue
+
+                with current_app.test_request_context(
+                    '/dd/webhook/update_stun_port',
+                    method='POST',
+                    json=payload,
+                    headers={'Authorization': request.headers.get('Authorization', '')}
+                ):
+                    result = webhook_update_stun_port()
+
+                webhook_update_stun_port_yy(payload)  # Update YY config as well
+
+                status = result[1] if isinstance(result, tuple) else 200
+                if status >= 400:
+                    stun_failed.append({
+                        "service_name": payload['service_name'],
+                        "status": status,
+                        "detail": result[0] if isinstance(result, tuple) else result,
+                    })
+                    continue
+
+                port_updated += 1
+            except Exception as e:
+                stun_failed.append({"service_name": rule.get("Name"), "reason": str(e), "source": rule})
+                logger.error(f"更新单条STUN失败(继续): {e}")
+
+        total_failed = len(ip_failed) + len(stun_failed)
+        logger.info(
+            f"Update all records finished. IP ok={ip_updated}, STUN ok={port_updated}, failed={total_failed}"
+        )
+
+        status_code = 200 if total_failed == 0 else 207
+        return {
+            "message": "Update all records finished.",
+            "ip_updates": ip_updated,
+            "stun_updates": port_updated,
+            "ip_failed_count": len(ip_failed),
+            "stun_failed_count": len(stun_failed),
+            "ip_failed": ip_failed,
+            "stun_failed": stun_failed,
+        }, status_code
+    except Exception as e:
+        logger.error(f"更新所有记录失败: {e}")
+        return {"error": str(e)}, 500
